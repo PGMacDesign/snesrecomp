@@ -257,6 +257,21 @@ static bool g_hidden_window;
 SDL_Window *g_window;
 
 static uint8 g_paused, g_turbo, g_cursor = true;
+/* Script-only switches (`blank`, `mute`) for a replay the player should not
+ * watch or hear, such as a fast-forward to a starting point. Both act on the
+ * host's output only: the guest runs, renders and mixes exactly as it would
+ * without them. Neither outlives the script (ReleaseScriptOutputSwitches). */
+static bool g_script_blank;
+static bool g_script_muted;  /* written under g_audio_mutex */
+/* What the host withheld, reported at exit so a check can prove both that
+ * the switches acted and (by the totals beside them) that output came back,
+ * and can account for every simulated frame: each one either presents once,
+ * or is counted here as kept back by `blank` or by turbo (script or Tab),
+ * which presents 1 frame in 16. */
+static uint64 g_script_blanked_presents;
+static uint64 g_turbo_skipped_presents;
+static uint64 g_script_muted_bytes;  /* under g_audio_mutex */
+static void SetScriptMuted(bool muted);
 static uint8 g_current_window_scale;
 static uint32 g_input_state;
 /* Gamepad-driven SNES controller bits, kept separate from g_input_state
@@ -749,7 +764,10 @@ typedef struct {
   int cond_waited;
   char *dump_tag;     // dump <tag>
   uint32 host_command; // optional zero-frame presentation command
+  uint8 host_switch;   // kScriptSwitch*: which on/off switch a host control sets
 } ScriptEntry;
+
+enum { kScriptSwitchTurbo, kScriptSwitchBlank, kScriptSwitchMute };
 
 /* Entry kinds carried in the high bits of ScriptEntry.mask. The zero-frame
  * kinds (until, dump, quit) run at the boundary where their wait ends and
@@ -893,6 +911,10 @@ static ScriptEntry *NewScriptEntry(int *cap) {
  *   loadstate N             load save-state slot N
  *   reset                   the Reset hotkey's console reset
  *   turbo on|off            change the held-Turbo state at this frame boundary
+ *   blank on|off            stop or resume presenting frames; the window keeps
+ *                           what it last showed (nothing, before the first)
+ *   mute on|off             silence or restore the audio output; the guest's
+ *                           sound is still mixed and drained as usual
  *   renderer toggle         invoke the renderer hotkey at this boundary
  *   poke <addr> <hex>       write WRAM bytes for one frame
  *   pokefor <addr> <hex> N  write WRAM bytes for N frames
@@ -906,7 +928,9 @@ static ScriptEntry *NewScriptEntry(int *cap) {
  *
  * The same file drives the snesref oracle (tools/snesref/README.md), with
  * the same per-frame meaning: every hold-type entry is followed by one idle
- * frame, and until/dump/quit consume no frames. */
+ * frame, and until/dump/quit consume no frames. blank and mute end with
+ * the script: once its last command has run they are off again, so a script
+ * cannot leave the player a dark or silent game. */
 static void LoadScript(const char *path) {
   FILE *f = fopen(path, "r");
   if (!f) { fprintf(stderr, "script: cannot open '%s'\n", path); return; }
@@ -927,15 +951,19 @@ static void LoadScript(const char *path) {
     if (strcmp(cmd, "wait") == 0) {
       int frames = (sscanf(line, "%*s %d", &n) == 1) ? n : 0;
       pending_wait += frames;
-    } else if (strcmp(cmd, "turbo") == 0) {
+    } else if (strcmp(cmd, "turbo") == 0 || strcmp(cmd, "blank") == 0 ||
+               strcmp(cmd, "mute") == 0) {
       if (sscanf(line, "%*s %63s", arg1) != 1 ||
           (strcmp(arg1, "on") != 0 && strcmp(arg1, "off") != 0)) {
-        fprintf(stderr, "script: expected 'turbo on' or 'turbo off': %s", line);
+        fprintf(stderr, "script: expected '%s on' or '%s off': %s", cmd, cmd, line);
         g_script_failed = g_script_quit = 1;
         continue;
       }
       ScriptEntry *e = NewScriptEntry(&cap);
       e->mask = kScriptHostControl | (strcmp(arg1, "on") == 0 ? 1u : 0u);
+      e->host_switch = strcmp(cmd, "blank") == 0 ? kScriptSwitchBlank
+                     : strcmp(cmd, "mute") == 0 ? kScriptSwitchMute
+                     : kScriptSwitchTurbo;
       e->wait_frames = pending_wait;
       pending_wait = 0;
     } else if (strcmp(cmd, "renderer") == 0) {
@@ -1072,12 +1100,23 @@ static void ScriptDump(const char *tag, unsigned frame) {
   fprintf(stderr, "script f=%u dump %s %s\n", frame, tag, rc ? "partial" : "ok");
 }
 
+/* Called on every frame after the script's last command. Cheap when
+ * nothing is set; the message marks the frame the output came back. */
+static void ReleaseScriptOutputSwitches(void) {
+  if (!g_script_blank && !g_script_muted) return;
+  fprintf(stderr, "script f=%u ended: blank off, mute off\n", (unsigned)snes_frame_counter);
+  g_script_blank = false;
+  SetScriptMuted(false);
+}
+
 static uint32 TickScript(void) {
   ApplyScriptForcePokes();
 
   for (;;) {
-  if (!g_script_entries || g_script_index >= g_script_count)
+  if (!g_script_entries || g_script_index >= g_script_count) {
+    ReleaseScriptOutputSwitches();
     return 0;
+  }
 
   ScriptEntry *e = &g_script_entries[g_script_index];
 
@@ -1111,8 +1150,14 @@ static uint32 TickScript(void) {
         fprintf(stderr, "script f=%u renderer=%s\n", frame,
                 snesrecomp_desktop_new_renderer() ? "new" : "reference");
       } else {
-        g_turbo = (e->mask & 1u) != 0;
-        fprintf(stderr, "script f=%u turbo %s\n", frame, g_turbo ? "on" : "off");
+        const bool on = (e->mask & 1u) != 0;
+        const char *name = "turbo";
+        switch (e->host_switch) {
+        case kScriptSwitchBlank: g_script_blank = on; name = "blank"; break;
+        case kScriptSwitchMute: SetScriptMuted(on); name = "mute"; break;
+        default: g_turbo = on; break;
+        }
+        fprintf(stderr, "script f=%u %s %s\n", frame, name, on ? "on" : "off");
       }
     } else {
       fprintf(stderr, "script f=%u quit\n", frame);
@@ -1425,7 +1470,13 @@ static void WritePpm(const char *path, const uint8 *pixel_buffer, int pitch,
     host_report_breadcrumb("screenshot: wrote %s (%dx%d) at frame %u", path, w, h, frame);
 }
 
-static void DrawPpuFrameWithPerf(void) {
+/* False when nothing was presented. `blank` is the one reason today; the
+ * per-frame site checks the switch itself before calling, so its withheld
+ * count never depends on this return. */
+static bool DrawPpuFrameWithPerf(void) {
+  /* Skipping the whole present, not drawing black, keeps every presenter
+   * (including one that substitutes its own picture) from showing a frame. */
+  if (g_script_blank) return false;
   double profile_start = ProfileStart();
   PreparePpuFrame();
   const int render_scale = 1;
@@ -1438,7 +1489,7 @@ static void DrawPpuFrameWithPerf(void) {
   ProfileEnd(kProfileAcquire, profile_start);
   if (!present_buffer) {
     g_renderer_funcs.EndDraw();
-    return;
+    return true;
   }
 
   /* LLE composes directly into the presenter's mapped buffer except while
@@ -1630,6 +1681,7 @@ static void DrawPpuFrameWithPerf(void) {
   g_renderer_funcs.EndDraw();
   ProfileEnd(kProfilePresent, profile_start);
   RecordFrameTiming(g_present_frame);
+  return true;
 }
 
 /* Seat-0 input word the overlays navigate with — the same sources the guest
@@ -2252,6 +2304,14 @@ static void HostWaitForAudioProducer(void) {
 
 /* Backend-agnostic mixer body. SDL2 calls it from its pull callback; SDL3 calls
  * it to fill a scratch buffer that is then pushed into the audio stream. */
+static void SetScriptMuted(bool muted) {
+  if (g_script_muted == muted) return;
+  /* Before audio init there is no callback to race. */
+  if (g_audio_mutex && !snesrecomp_sdl_lock_mutex(g_audio_mutex)) Die("Mutex lock failed!");
+  g_script_muted = muted;
+  if (g_audio_mutex) SDL_UnlockMutex(g_audio_mutex);
+}
+
 static void FillAudioBuffer(Uint8 *stream, int len) {
   /* Boot-stage marker: proves the audio thread reached the mixer at
    * least once (the "crashed before the first sound" class of report). */
@@ -2278,7 +2338,12 @@ static void FillAudioBuffer(Uint8 *stream, int len) {
       g_audiobuffer_end = g_audiobuffer + g_frames_per_block * g_audio_channels * sizeof(int16);
     }
     int n = IntMin(len, g_audiobuffer_end - g_audiobuffer_cur);
-    if (g_sdl_audio_mixer_volume == SNESRECOMP_SDL_MIX_MAXVOLUME) {
+    if (g_script_muted) {
+      /* Rendered and consumed as usual above, so the guest-side buffer
+       * drains at the same rate muted or not; only the device hears 0s. */
+      SDL_memset(stream, 0, n);
+      g_script_muted_bytes += (uint64)n;
+    } else if (g_sdl_audio_mixer_volume == SNESRECOMP_SDL_MIX_MAXVOLUME) {
       memcpy(stream, g_audiobuffer_cur, n);
     } else {
       SDL_memset(stream, 0, n);
@@ -4286,7 +4351,7 @@ error_reading:;
       }
       g_present_alpha = 1;
       if (snes_savestate_menu_is_open()) PresentFrozenWithOverlay();
-      else DrawPpuFrameWithPerf();
+      else if (!DrawPpuFrameWithPerf()) continue;
       ++presentations;
       continue;
     }
@@ -4317,8 +4382,7 @@ error_reading:;
           double presented_at = MonotonicSeconds();
           g_present_alpha = presentation_hz != g_simulation_hz
               ? snes_host_clock_alpha(&video_clock, presented_at) : 1;
-          DrawPpuFrameWithPerf();
-          ++presentations;
+          if (DrawPpuFrameWithPerf()) ++presentations;
           /* Count deadlines at dispatch, not after the render/upload cost:
            * crossing the next deadline while drawing does not consume it. */
           snes_host_clock_presentation_done(&video_clock, presented_at);
@@ -4558,14 +4622,22 @@ error_reading:;
     }
     else
       snes_host_clock_reset(&video_clock, MonotonicSeconds(), g_simulation_hz, presentation_hz);
-    if (!g_snes->disableRender &&
-        (!paced_custom || snes_host_clock_presentation_due(&video_clock, MonotonicSeconds()) ||
-         (run_frames && frameCtr >= run_frames))) {
+    /* Counted here, at the one present per simulated frame, and not in the
+     * between-frame re-presents above, so presents plus withheld is the
+     * number of simulated frames. */
+    if (g_snes->disableRender) {
+      g_turbo_skipped_presents++;
+    } else if (!paced_custom || snes_host_clock_presentation_due(&video_clock, MonotonicSeconds()) ||
+               (run_frames && frameCtr >= run_frames)) {
       double presented_at = MonotonicSeconds();
       g_present_alpha = paced_custom && presentation_hz != g_simulation_hz
           ? snes_host_clock_alpha(&video_clock, presented_at) : 1;
-      DrawPpuFrameWithPerf();
-      ++presentations;
+      /* `blank` is decided from the switch, not from a failed draw: a
+       * present lost for any other reason must stay uncounted, so a check
+       * of presents plus withheld catches it instead of reading it as an
+       * intentional withhold. */
+      if (g_script_blank) g_script_blanked_presents++;
+      else if (DrawPpuFrameWithPerf()) ++presentations;
       snes_host_clock_presentation_done(&video_clock, presented_at);
     }
     if (run_frames && frameCtr >= run_frames) {
@@ -4598,6 +4670,13 @@ error_reading:;
   host_report_breadcrumb("video totals: simulations=%u presentations=%llu seconds=%.3f",
                          frameCtr, (unsigned long long)presentations,
                          run_end - run_start);
+  if (g_script_blanked_presents || g_turbo_skipped_presents || g_script_muted_bytes)
+    host_report_breadcrumb("script output withheld: presents=%llu blank=%llu turbo=%llu "
+                           "audio_bytes=%llu",
+                           (unsigned long long)(g_script_blanked_presents + g_turbo_skipped_presents),
+                           (unsigned long long)g_script_blanked_presents,
+                           (unsigned long long)g_turbo_skipped_presents,
+                           (unsigned long long)g_script_muted_bytes);
   host_report_breadcrumb("frame service: implementation=%s seconds=%.9f fps=%.3f cpu_seconds=%.9f",
       SNESRECOMP_FRAME_STAGING_HLE ? "HLE" : "LLE", run_end - run_start,
       run_end > run_start ? frameCtr / (run_end - run_start) : 0,
