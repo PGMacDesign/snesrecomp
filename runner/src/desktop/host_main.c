@@ -248,6 +248,12 @@ static const char *HostGetenv(const char *name) {
 }
 
 static uint32 g_win_flags = SDL_WINDOW_RESIZABLE;
+/* SNESRECOMP_HIDDEN_WINDOW=1 (or <env_prefix>_HIDDEN_WINDOW): the window is
+ * created hidden and never shown, raised or activated, and the app keeps out
+ * of the Dock and app switcher. For automated runs that need a real video
+ * driver (a GPU swapchain) but must not pop up over the desktop or take
+ * keyboard focus, where typing would feed a test run's input. */
+static bool g_hidden_window;
 SDL_Window *g_window;
 
 static uint8 g_paused, g_turbo, g_cursor = true;
@@ -3198,8 +3204,10 @@ static void RunInGameLauncher(bool *running, const char **exit_reason) {
                          rom[0] ? rom : "(unchanged)");
   if (act != RECOMP_LAUNCHER_RESULT_UNAVAILABLE)
     LauncherCommit(&ls, g_active_config_file);
-  SDL_ShowWindow(g_window);
-  SDL_RaiseWindow(g_window);
+  if (!g_hidden_window) {
+    SDL_ShowWindow(g_window);
+    SDL_RaiseWindow(g_window);
+  }
   /* Closing the launcher's window can queue an application quit (its window
    * was the last visible one). That close meant "back to the game". */
   SDL_FlushEvent(SDL_QUIT);
@@ -3738,6 +3746,21 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
 
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
 
+  {
+    const char *hidden = HostGetenv("HIDDEN_WINDOW");
+    g_hidden_window = hidden && strcmp(hidden, "0") != 0;
+  }
+  if (g_hidden_window) {
+    /* Before SDL_Init: on macOS the app's activation policy is set there. */
+    SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
+#ifdef SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN
+    SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+#endif
+#ifdef SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED
+    SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
+#endif
+  }
+
   // set up SDL
   SDL_SetMainReady();
   /* Return convention flipped in SDL3 (0 == success became true == success),
@@ -3871,6 +3894,9 @@ error_reading:;
   }
 #endif
 
+  /* Hidden from creation: a window shown and then hidden still reaches the
+   * window server for a moment. */
+  if (g_hidden_window) g_win_flags |= SDL_WINDOW_HIDDEN;
   /* SDL3 dropped the x/y arguments from SDL_CreateWindow. */
   SDL_Window *window = snesrecomp_sdl_create_window(
       g_window_title, window_width, window_height, g_win_flags);
@@ -3881,8 +3907,9 @@ error_reading:;
   }
   g_window = window;
   SDL_SetWindowHitTest(window, HitTestCallback, NULL);
-  host_report_breadcrumb("window created: %dx%d flags=0x%x",
-                         window_width, window_height, g_win_flags);
+  host_report_breadcrumb("window created: %dx%d flags=0x%x%s",
+                         window_width, window_height, g_win_flags,
+                         g_hidden_window ? " hidden" : "");
 
   if (!g_renderer_funcs.Initialize(window)) {
     host_report_breadcrumb("renderer init FAILED (output_method=%d)",
