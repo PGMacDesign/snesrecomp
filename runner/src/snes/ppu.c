@@ -2176,6 +2176,11 @@ static void PpuDrawBackground_mode7(Ppu *ppu, PpuPixelPrioBufs *dstbuf, uint y, 
     bool char_fill = PPU_m7charFill(ppu);
     if (mosaic_enabled) {
       int w = PPU_mosaicSize(ppu) - (x - PpuMosaicAt(ppu, x));
+      /* TEMPORARY (FF6 port fork): the same bounds clamp as the 2bpp/4bpp
+       * mosaic paths, for the same window-edge case. A w <= 0 here makes the
+       * do/while(++i != w) fill below run off the line buffer; FF6 hits it
+       * with SIGBUS on the world map's mosaic entry. */
+      if (w <= 0 || w > PPU_mosaicSize(ppu)) w = PPU_mosaicSize(ppu);
       do {
         w = IntMin(w, dstz_end - dstz);
         if ((uint32)(xpos | ypos) > outside_value) {
