@@ -926,6 +926,13 @@ static void PpuRunLineJob(Ppu* ppu, int line, bool pixels, bool live) {
     ppu->timeOver = false;
     ppu->evenFrame = !ppu->evenFrame;
   } else {
+    /* $213E's overflow flags hold until the next frame starts. Frame-model
+     * hosts draw lines 1..224 and never pass line 0, so line 1 clears them
+     * too; otherwise one overflow would read back set forever. */
+    if (line == 1) {
+      ppu->rangeOver = false;
+      ppu->timeOver = false;
+    }
     PpuDrawVisibleLine(ppu, line, pixels, live);
   }
 }
