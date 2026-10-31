@@ -43,6 +43,7 @@ enum {
   kPpuExtraLeftRight = 272,
   // Full internal width of the priority buffers (logical 256 + both borders).
   kPpuBufWidth = kPpuXPixels + kPpuExtraLeftRight * 2,
+  kPpuObjSlotNone = 0xff,
   // Split-screen games can assign distinct anchor layouts to each viewport.
   kPpuWsAnchorBands = 2,
   // Number of stopped frames tolerated after a moving unhinted OBJ reaches the
@@ -326,6 +327,16 @@ struct Ppu {
   size_t extraObjectCount;
   uint16_t objectColors[kPpuBufWidth];
   uint64_t objectOrder[kPpuBufWidth];
+  /* Host-only, off while NULL: a host that points it at kPpuBufWidth bytes
+   * gets, for each objBuffer position of the line just drawn, the OAM slot
+   * (0-127) whose pixel is there, or kPpuObjSlotNone. It is written beside
+   * objBuffer, so it names the sprite that won even where two sprites drew
+   * the same color. Extra host objects have no slot here: a line they drew
+   * on sets objSlotLineHasExtra, and its slots are not to be trusted.
+   * Drawing never reads either; neither is guest state or serialized, and
+   * ppu_reset turns the buffer off, as it does renderVram. */
+  uint8_t *objSlotBuffer;
+  bool objSlotLineHasExtra;
   /* Per-source isolated priority pixels for generic host-overlay captures. */
   PpuPixelPrioBufs overlayBuffers[kPpuOverlaySource_Count];
   PpuOverlayCapture overlayCaptures[kPpuOverlaySource_Count];

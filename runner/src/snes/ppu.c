@@ -833,6 +833,8 @@ static void PpuDrawVisibleLine(Ppu *ppu, int line, bool pixels, bool live) {
   }
 
   ClearBackdrop(ppu, &ppu->objBuffer);
+  if (ppu->objSlotBuffer) memset(ppu->objSlotBuffer, kPpuObjSlotNone, kPpuBufWidth);
+  ppu->objSlotLineHasExtra = false;
   if (ppu->overlayRenderBuffer[kPpuOverlaySource_Obj])
     memset(&ppu->overlayBuffers[kPpuOverlaySource_Obj], 0,
            sizeof(ppu->overlayBuffers[kPpuOverlaySource_Obj]));
@@ -3099,6 +3101,8 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
               }
         // Lower OAM indices are processed later and overwrite higher ones.
                 dst[0] = z + pixel;
+                if (ppu->objSlotBuffer)
+                  ppu->objSlotBuffer[dst - ppu->objBuffer.data] = (uint8_t)slot;
                 if(ppu->extraObjectCount)
                   ppu->objectOrder[dst-ppu->objBuffer.data]=(uint64_t)((slot-first_slot)&127)<<32;
             }
@@ -3110,6 +3114,7 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
   bool extra=ppu->extraObjectCount && PpuComposeExtraObjects(
       ppu->extraObjects,ppu->extraObjectCount,line,-kPpuExtraLeftRight,
       kPpuBufWidth,first_slot,ppu->objBuffer.data,ppu->objectColors,ppu->objectOrder);
+  ppu->objSlotLineHasExtra = extra;
   return tilesFound != 0 || extra;
 }
 
