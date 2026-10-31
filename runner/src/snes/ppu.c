@@ -1804,6 +1804,12 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
     x &= 7;
     int mosaic_size = PPU_mosaicSize(ppu);
     int w = mosaic_size - (sx - PpuMosaicAt(ppu, sx));
+    /* TEMPORARY (FF6 port fork): a bounds clamp, not a root-cause fix;
+     * remove once the mosaic window-edge case is fixed properly.
+     * PpuMosaicAt clamps an out-of-range sx, so a window edge outside the
+     * visible span can make w <= 0, and the do/while(++i != w) fill below
+     * then runs off the line buffer. */
+    if (w <= 0 || w > mosaic_size) w = mosaic_size;
     do {
       w = IntMin(w, dstz_end - dstz);
       uint32 tile = WS_TILE(*tp, ws_sx);
@@ -2097,6 +2103,12 @@ static void PpuDrawBackground_2bpp_mosaic(Ppu *ppu, PpuPixelPrioBufs *dstbuf, in
     x &= 7;
     int mosaic_size = PPU_mosaicSize(ppu);
     int w = mosaic_size - (sx - PpuMosaicAt(ppu, sx));
+    /* TEMPORARY (FF6 port fork): a bounds clamp, not a root-cause fix;
+     * remove once the mosaic window-edge case is fixed properly.
+     * PpuMosaicAt clamps an out-of-range sx, so a window edge outside the
+     * visible span can make w <= 0, and the do/while(++i != w) fill below
+     * then runs off the line buffer. */
+    if (w <= 0 || w > mosaic_size) w = mosaic_size;
     do {
       w = IntMin(w, dstz_end - dstz);
       uint32 tile = *tp;
