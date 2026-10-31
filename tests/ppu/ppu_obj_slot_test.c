@@ -1,7 +1,9 @@
 /* Synthetic check of the host-only OBJ slot buffer (Ppu.objSlotBuffer): it
  * names the OAM slot whose pixel won each objBuffer position, including where
  * two sprites drew the same color, follows OAM priority rotation, clears every
- * line, and leaves the picture byte-identical whether it is on or off.
+ * line, and leaves the picture byte-identical whether it is on or off. A
+ * transparent pixel or one the widescreen left-edge clip drops leaves the slot
+ * behind it; the OBJ window, applied at composition, leaves the slots alone.
  * No game ROM, generated data, or platform frontend is required. */
 #include <stdbool.h>
 #include <stdio.h>
@@ -93,6 +95,23 @@ static int count_wrong(const uint8_t *slots, int front) {
     return wrong;
 }
 
+/* A slot is recorded exactly where objBuffer holds a sprite pixel, across
+ * screen x lo..hi-1: the buffer may not name a slot the sprite pass skipped. */
+static int slots_follow_obj(const Ppu *ppu, const uint8_t *slots, int lo, int hi) {
+    int wrong = 0;
+    for (int x = lo; x < hi; x++) {
+        const bool drawn = ppu->objBuffer.data[kPpuExtraLeftRight + x] != 0x0500;
+        wrong += drawn != (slot_at(slots, x) != kPpuObjSlotNone);
+    }
+    return wrong;
+}
+
+/* The slot's 9-bit x at raw 0x100 + low: screen x low - 256. */
+static void place_left_of_screen(Ppu *ppu, int slot, int low) {
+    ppu->oam[slot * 2] = (uint16_t)low;
+    ppu->highOam[(slot * 2) >> 3] |= (uint8_t)(1u << ((slot * 2) & 7));
+}
+
 int main(void) {
     static uint8_t slots[kPpuBufWidth];
     uint8_t pixels[kPitch], plain[kPitch];
@@ -130,6 +149,74 @@ int main(void) {
     ppu->oamaddl = 7 * 2;
     draw_line_0(ppu);
     failures += check(count_wrong(slots, 7) == 0, "rotation: slot 7 wins the overlap");
+
+    /* A transparent front pixel does not claim the position: slot 3 (in
+     * front) moves over slot 7 with a tile whose left half is color 0, so 7
+     * shows through at 14..17 and 3 wins only at 18..21. */
+    setup_two_same_color_sprites(ppu, pixels);
+    ppu->objSlotBuffer = slots;
+    ppu->oam[3 * 2] = 14;
+    ppu->oam[3 * 2 + 1] = 1;
+    for (int i = 16; i < 32; i++) ppu->vram[i] = 0x0f0f;
+    draw_line_0(ppu);
+    {
+        int wrong = 0;
+        for (int x = 0; x < kPpuXPixels; x++) {
+            const int want = x >= 14 && x < 18 ? 7 : x >= 18 && x < 22 ? 3 : kPpuObjSlotNone;
+            wrong += slot_at(slots, x) != want;
+        }
+        failures += check(wrong == 0, "transparent front pixels: 7 at 14..17 through 3's color 0, 3 at 18..21");
+        failures += check(slots_follow_obj(ppu, slots, 0, kPpuXPixels) == 0,
+                          "transparent front pixels: a slot only where objBuffer holds a sprite pixel");
+    }
+
+    /* The OBJ window masks the picture at composition, after the sprite pass:
+     * objBuffer and the slots keep slot 3 at 10..13, the picture does not.
+     * A host tells shown from masked by comparing objBuffer with the line's
+     * composited buffer, as for any covered sprite pixel. */
+    setup_two_same_color_sprites(ppu, pixels);
+    ppu->objSlotBuffer = slots;
+    ppu->screenWindowed[0] = 1 << 4;
+    ppu->windowsel = (uint32_t)kWindow1Enabled << 16;
+    ppu->window1left = 10;
+    ppu->window1right = 13;
+    draw_line_0(ppu);
+    {
+        bool masked = true, shown = true;
+        for (int x = 10; x < 14; x++) masked = masked && !memcmp(pixels + x * 4, pixels, 4);
+        for (int x = 14; x < 22; x++) shown = shown && memcmp(pixels + x * 4, pixels, 4);
+        failures += check(masked && shown, "OBJ window: the picture hides 10..13 and shows 14..21");
+        failures += check(count_wrong(slots, 3) == 0 && slots_follow_obj(ppu, slots, 0, kPpuXPixels) == 0,
+                          "OBJ window: the slots follow objBuffer, 3 at 10..17, 7 at 18..21");
+    }
+
+    /* The widescreen left-edge clip drops an unhinted sprite's pixels left of
+     * x 0 inside the sprite pass: slot 3 at x -4 is unhinted and clipped at
+     * -4..-1, so hinted slot 7 at x -8 keeps -8..-1 and 3 has only 0..3. */
+    {
+        enum { kExtra = 16 };
+        static uint8_t wide[(kPpuXPixels + 2 * kExtra) * 4];
+        uint8_t hints[16] = {0};
+        hints[0] = 1u << 7;
+        setup_two_same_color_sprites(ppu, pixels);
+        PpuBeginDrawing(ppu, wide, sizeof wide, kPpuRenderFlags_NewRenderer);
+        PpuSetExtraSpace(ppu, kExtra);
+        PpuWsSetOamLeftHints(ppu, hints);
+        ppu->wsOamMotionGraceOn = 0;
+        ppu->objSlotBuffer = slots;
+        place_left_of_screen(ppu, 3, 0xfc);
+        place_left_of_screen(ppu, 7, 0xf8);
+        draw_line_0(ppu);
+        int wrong = 0;
+        for (int x = -kExtra; x < kPpuXPixels + kExtra; x++) {
+            const int want = x >= -8 && x < 0 ? 7 : x >= 0 && x < 4 ? 3 : kPpuObjSlotNone;
+            wrong += slot_at(slots, x) != want;
+        }
+        failures += check(wrong == 0, "left-edge clip: 7 at -8..-1, 3 only at 0..3");
+        failures += check(slots_follow_obj(ppu, slots, -kExtra, kPpuXPixels + kExtra) == 0,
+                          "left-edge clip: a slot only where objBuffer holds a sprite pixel");
+        PpuWsSetOamLeftHints(ppu, NULL);
+    }
 
     /* Every line starts clear: sprites gone, then forced blank. */
     for (int slot = 0; slot < 128; slot++) ppu->oam[slot * 2] = 0xf000;
