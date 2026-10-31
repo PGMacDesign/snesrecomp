@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "common_cpu_infra.h"
 #include "common_rtl.h"
@@ -152,6 +153,26 @@ void snes_beam_frame_driver_run_frame(void) {
     s_wai_halted = false;
     run_interrupt(nmi_vector(), frame_end);
     g_snes->inNmi = false;
+    /* TEMPORARY (FF6 port fork): remove once the RDNMI poll race has a real
+     * fix in the beam driver. A main-thread `LDA/BIT/CMP $4210 ; BPL`
+     * poll with NMI enabled exits on hardware because the poll's read lands
+     * in the window between the flag rising and the NMI being taken. The
+     * handler then reads $4210 and finds it already clear. Here the handler
+     * runs first and clears the latch, so the poll never exits. Re-arm the
+     * latch for the parked poll so its next read observes this vblank.
+     * Known gap: the long-address form (`LDA f:$004210`, opcode AF) is not
+     * matched. */
+    {
+      uint8_t op = snes_read(g_snes, s_resume_pc);
+      uint8_t lo = snes_read(g_snes, (s_resume_pc & 0xFF0000u) | ((s_resume_pc + 1u) & 0xFFFFu));
+      uint8_t hi = snes_read(g_snes, (s_resume_pc & 0xFF0000u) | ((s_resume_pc + 2u) & 0xFFFFu));
+      if ((op == 0xAD || op == 0x2C || op == 0xCD) && lo == 0x10 && hi == 0x42) {
+        static unsigned s_rdnmi_poll_rearms;
+        g_snes->rdnmiPending = true;
+        if (s_rdnmi_poll_rearms++ < 8)
+          fprintf(stderr, "[ff6-pin] re-armed RDNMI for poll at %06X\n", (unsigned)s_resume_pc);
+      }
+    }
   }
 
   /* Run out the field, taking each interrupt at the beam position it latches
