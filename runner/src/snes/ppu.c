@@ -925,6 +925,7 @@ static void PpuRunLineJob(Ppu* ppu, int line, bool pixels, bool live) {
     ppu->rangeOver = false;
     ppu->timeOver = false;
     ppu->evenFrame = !ppu->evenFrame;
+    ppu->frameStartedOnLine0 = true;
   } else {
     /* $213E's overflow flags hold until the next frame starts. Frame-model
      * hosts draw lines 1..224 and never pass line 0, so line 1 clears them
@@ -932,6 +933,11 @@ static void PpuRunLineJob(Ppu* ppu, int line, bool pixels, bool live) {
     if (line == 1) {
       ppu->rangeOver = false;
       ppu->timeOver = false;
+      /* The field flips once per frame. Clearing twice is harmless; flipping
+       * twice is not, so line 1 flips only when line 0 did not run. */
+      if (!ppu->frameStartedOnLine0)
+        ppu->evenFrame = !ppu->evenFrame;
+      ppu->frameStartedOnLine0 = false;
     }
     PpuDrawVisibleLine(ppu, line, pixels, live);
   }

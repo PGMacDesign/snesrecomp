@@ -211,6 +211,7 @@ struct Ppu {
   bool evenFrame;
   bool frameOverscan; // if we are overscanning this frame (determined at 0,225)
   bool frameInterlace; // if we are interlacing this frame (determined at start vblank)
+  bool frameStartedOnLine0; // line 0 ran (and flipped evenFrame) since the last line 1
   // latching
   uint16_t hCount;
   uint16_t vCount;
