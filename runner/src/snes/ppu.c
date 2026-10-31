@@ -708,13 +708,17 @@ static inline void ClearBackdrop(const Ppu *ppu, PpuPixelPrioBufs *buf) {
     *(uint64*)&buf->data[i] = 0x0500050005000500;
 }
 
-// mosaicModulo is sized for the logical 256-wide screen, but widescreen window
-// edges can fall in the border (negative on the left, >=256 on the right).
-// Clamp the lookup so the rare mosaic+widescreen combination stays in-bounds;
-// border mosaic alignment is approximate but never reads out of range. With
-// extra==0 (authentic) every index is already in [0,256), so this is a no-op.
-static inline uint8 PpuMosaicAt(Ppu *ppu, int i) {
-  return ppu->mosaicModulo[(unsigned)i < (unsigned)kPpuXPixels ? i : (i < 0 ? 0 : kPpuXPixels - 1)];
+// The first column of the mosaic block holding x. mosaicModulo covers the
+// logical 256-wide screen; widescreen window edges can fall in the border
+// (negative on the left, >=256 on the right), where the same block arithmetic
+// applies. Either way x - PpuMosaicAt(x) is in [0, size), so a mosaic run that
+// starts at x is 1..size pixels wide.
+static inline int PpuMosaicAt(Ppu *ppu, int i) {
+  if ((unsigned)i < (unsigned)kPpuXPixels)
+    return ppu->mosaicModulo[i];
+  const int size = PPU_mosaicSize(ppu);
+  const int r = i % size;
+  return i - (r < 0 ? r + size : r);
 }
 
 /* Frame of the last OAM ring snapshot; see the note in ppu_runLine. Debug
@@ -794,7 +798,12 @@ static bool PpuOptimizedRendererHandlesMode(uint mode) {
   return mode <= 3 || mode == 7;
 }
 
-static void PpuPrepareMosaic(Ppu *ppu) {
+// Every drawn line reads mosaicModulo for the current $2106 size, so the table
+// is brought up to date before each line, not only on line 0: a frame-model
+// host draws lines 1..224 and never passes line 0, and a table left at its
+// zero fill draws every mosaic line from row 0 and makes the run width
+// x - PpuMosaicAt(x) go negative.
+static void PpuEnsureMosaicTable(Ppu *ppu) {
   if (PPU_mosaicSize(ppu) != ppu->lastMosaicModulo) {
     int mod = PPU_mosaicSize(ppu);
     ppu->lastMosaicModulo = mod;
@@ -803,11 +812,16 @@ static void PpuPrepareMosaic(Ppu *ppu) {
       j = (j + 1 == mod ? 0 : j + 1);
     }
   }
+}
+
+static void PpuPrepareMosaic(Ppu *ppu) {
+  PpuEnsureMosaicTable(ppu);
   ppu->mosaicStartLine = 1;
 }
 
 static void PpuDrawVisibleLine(Ppu *ppu, int line, bool pixels, bool live) {
   PPU_T0_DECL
+  PpuEnsureMosaicTable(ppu);
   // Cache the brightness computation.
   if (PPU_brightness(ppu) != ppu->lastBrightnessMult) {
     uint8_t ppu_brightness = PPU_brightness(ppu);
@@ -1804,12 +1818,6 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
     x &= 7;
     int mosaic_size = PPU_mosaicSize(ppu);
     int w = mosaic_size - (sx - PpuMosaicAt(ppu, sx));
-    /* TEMPORARY (FF6 port fork): a bounds clamp, not a root-cause fix;
-     * remove once the mosaic window-edge case is fixed properly.
-     * PpuMosaicAt clamps an out-of-range sx, so a window edge outside the
-     * visible span can make w <= 0, and the do/while(++i != w) fill below
-     * then runs off the line buffer. */
-    if (w <= 0 || w > mosaic_size) w = mosaic_size;
     do {
       w = IntMin(w, dstz_end - dstz);
       uint32 tile = WS_TILE(*tp, ws_sx);
@@ -2103,12 +2111,6 @@ static void PpuDrawBackground_2bpp_mosaic(Ppu *ppu, PpuPixelPrioBufs *dstbuf, in
     x &= 7;
     int mosaic_size = PPU_mosaicSize(ppu);
     int w = mosaic_size - (sx - PpuMosaicAt(ppu, sx));
-    /* TEMPORARY (FF6 port fork): a bounds clamp, not a root-cause fix;
-     * remove once the mosaic window-edge case is fixed properly.
-     * PpuMosaicAt clamps an out-of-range sx, so a window edge outside the
-     * visible span can make w <= 0, and the do/while(++i != w) fill below
-     * then runs off the line buffer. */
-    if (w <= 0 || w > mosaic_size) w = mosaic_size;
     do {
       w = IntMin(w, dstz_end - dstz);
       uint32 tile = *tp;
@@ -2176,11 +2178,6 @@ static void PpuDrawBackground_mode7(Ppu *ppu, PpuPixelPrioBufs *dstbuf, uint y, 
     bool char_fill = PPU_m7charFill(ppu);
     if (mosaic_enabled) {
       int w = PPU_mosaicSize(ppu) - (x - PpuMosaicAt(ppu, x));
-      /* TEMPORARY (FF6 port fork): the same bounds clamp as the 2bpp/4bpp
-       * mosaic paths, for the same window-edge case. A w <= 0 here makes the
-       * do/while(++i != w) fill below run off the line buffer; FF6 hits it
-       * with SIGBUS on the world map's mosaic entry. */
-      if (w <= 0 || w > PPU_mosaicSize(ppu)) w = PPU_mosaicSize(ppu);
       do {
         w = IntMin(w, dstz_end - dstz);
         if ((uint32)(xpos | ypos) > outside_value) {
