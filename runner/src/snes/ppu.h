@@ -337,6 +337,16 @@ struct Ppu {
    * ppu_reset turns the buffer off, as it does renderVram. */
   uint8_t *objSlotBuffer;
   bool objSlotLineHasExtra;
+  /* Host-only, off while NULL: a host that points it at kPpuBufWidth bytes
+   * gets, for each position of the line just drawn, 1 where the color window
+   * let color math apply (CGWSEL's prevent-math setting) and 0 where it did
+   * not or nothing was composed (forced blank, a line run for state only,
+   * the legacy renderer). It holds the spans composition used,
+   * widescreen widening included, so a host asking whether the subscreen
+   * showed through a translucent layer reads what the picture did rather
+   * than recomputing the window. Drawing never reads it; it is not guest
+   * state or serialized, and ppu_reset turns it off. */
+  uint8_t *mathWindowBuffer;
   /* Per-source isolated priority pixels for generic host-overlay captures. */
   PpuPixelPrioBufs overlayBuffers[kPpuOverlaySource_Count];
   PpuOverlayCapture overlayCaptures[kPpuOverlaySource_Count];

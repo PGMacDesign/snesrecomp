@@ -106,6 +106,16 @@ echo "=== PPU OBJ slot buffer names the winning sprite ==="
     -lm -o "$OUT/ppu_obj_slot_test"
 "$OUT/ppu_obj_slot_test"
 
+echo "=== PPU color math window buffer follows CGWSEL ==="
+"$CC" -std=c11 -Wall -Wextra -O1 \
+    -DSNESRECOMP_REVERSE_DEBUG=0 \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/ppu/ppu_math_window_test.c" \
+    "$ROOT/runner/src/snes/ppu.c" \
+    "$ROOT/runner/src/snes/ppu_legacy.c" \
+    -lm -o "$OUT/ppu_math_window_test"
+"$OUT/ppu_math_window_test"
+
 echo "=== PPU modes 4-6 fall back to the compatibility renderer ==="
 "$CC" -std=c11 -Wall -Wextra -O1     -DSNESRECOMP_REVERSE_DEBUG=0     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes"     "$ROOT/tests/ppu/ppu_hires_mode_test.c"     "$ROOT/runner/src/snes/ppu.c"     "$ROOT/runner/src/snes/ppu_legacy.c"     -lm -o "$OUT/ppu_hires_mode_test"
 "$OUT/ppu_hires_mode_test"

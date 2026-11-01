@@ -835,6 +835,9 @@ static void PpuDrawVisibleLine(Ppu *ppu, int line, bool pixels, bool live) {
   ClearBackdrop(ppu, &ppu->objBuffer);
   if (ppu->objSlotBuffer) memset(ppu->objSlotBuffer, kPpuObjSlotNone, kPpuBufWidth);
   ppu->objSlotLineHasExtra = false;
+  /* Cleared before the pixels check, so a line run for state only, or drawn
+   * by the legacy renderer, leaves no earlier line's window behind. */
+  if (ppu->mathWindowBuffer) memset(ppu->mathWindowBuffer, 0, kPpuBufWidth);
   if (ppu->overlayRenderBuffer[kPpuOverlaySource_Obj])
     memset(&ppu->overlayBuffers[kPpuOverlaySource_Obj], 0,
            sizeof(ppu->overlayBuffers[kPpuOverlaySource_Obj]));
@@ -2558,6 +2561,8 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
   uint32 windex = 0;
   do {
     uint32 left = cwin.edges[windex] + kPpuExtraLeftRight, right = cwin.edges[windex + 1] + kPpuExtraLeftRight;
+    if (ppu->mathWindowBuffer && right > left)
+      memset(ppu->mathWindowBuffer + left, (cw_clip_math & 0x100) ? 1 : 0, right - left);
     // If clip is set, then zero out the rgb values from the main screen.
     uint32 clip_color_mask = (cw_clip_math & 1) ? 0x1f : 0;
     uint32 math_enabled_cur = PPU_mathEnabled(ppu) & ((cw_clip_math & 0x100) ? -1 : 0);
